@@ -1,0 +1,1782 @@
+//This function creates the UI tab to run these functions from the sheet
+function onOpen() {
+  var ui = SpreadsheetApp.getUi();
+  ui.createMenu('Move Inventory')
+      .addItem('Check for Subs', 'lookForSubs')
+      .addItem('Filter Inventory', 'filterInventory')
+      .addItem('Update Inventory Quantities', 'inventoryCheck')
+      .addItem('Send to Template', 'moveInventory')
+      .addItem('Download Template','downloadTemplate')
+      .addToUi();
+
+}
+
+/** On open, remove old mo data from master data tab */
+function compareAndCleanMasterData() {
+  var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  var masterDataSheet = spreadsheet.getSheetByName('master_data');
+  var sheets = spreadsheet.getSheets();
+
+  // Sheets to skip
+  var sheetsToSkip = ['master_data', 'import_template_ab', 'updated_quantities'];
+
+  // Collect unique MO numbers from Master Data
+  var masterDataRange = masterDataSheet.getDataRange();
+  var masterDataValues = masterDataRange.getValues();
+  var masterMoNumbers = new Set();
+
+  for (var i = 1; i < masterDataValues.length; i++) { // Assuming the first row is the header
+    var moNumber = masterDataValues[i][0];
+    if (moNumber) {
+      masterMoNumbers.add(moNumber.toString());
+    }
+  }
+
+  // Collect MO numbers from MK sheets
+  var mkMoNumbers = new Set();
+  for (var i = 0; i < sheets.length; i++) {
+    var mkSheet = sheets[i];
+    var mkSheetName = mkSheet.getName();
+
+    // Skip sheets with specific names
+    if (sheetsToSkip.includes(mkSheetName.toLowerCase())) {
+      continue;
+    }
+
+    var range = mkSheet.getDataRange();
+    var values = range.getValues();
+
+    for (var j = 1; j < values.length; j++) { // Assuming the first row is the header
+      var moNumber = values[j][0];
+      if (moNumber) {
+        mkMoNumbers.add(moNumber.toString());
+      }
+    }
+  }
+
+  // Find and delete rows in Master Data that are not in MK sheets and not null
+  var rowsToDelete = [];
+  for (var i = 1; i < masterDataValues.length; i++) {
+    var moNumber = masterDataValues[i][0] ? masterDataValues[i][0].toString() : null;
+    if (moNumber && !mkMoNumbers.has(moNumber)) {
+      rowsToDelete.push(i + 1); // Account for header row
+    }
+  }
+
+  // Delete rows from bottom to top to avoid index shifting
+  rowsToDelete.reverse().forEach(function(row) {
+    masterDataSheet.deleteRow(row);
+  });
+}
+
+/** On open, clear highlighting from master data tab */
+function clearMasterDataFillColor() {
+    var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    var masterDataSheet = spreadsheet.getSheetByName("master_data");
+
+    if (masterDataSheet) {
+        // Get the range to clear fill color
+        var range = masterDataSheet.getDataRange();
+       
+        // Clear the fill color
+        range.setBackground(null);
+    }
+}
+
+
+/** Locking Cells for edit protection */
+function cellLock(){
+  var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = spreadsheet.getActiveSheet();
+
+  // Check if the active sheet name starts with 'MK'
+  if (sheet.getName().indexOf('MK') === 0) {
+    // Get the last row with content in column A
+    var finalRow = sheet.getLastRow();
+
+    // Define the range to be protected (all rows in columns A to I)
+    var range = sheet.getRange('A:G' + finalRow);
+
+    // Protect the range
+    var protection = range.protect();
+
+    // Set options for the protection
+    protection.setDescription('Locked Range');
+    protection.setWarningOnly(true); // Allow users to edit with warning
+  }
+
+}
+
+
+/** Identify an MK sheet with boxes checked as the active sheet */
+function findActiveSheetWithCheckedCheckbox() {
+  var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  var sheets = spreadsheet.getSheets();
+
+  for (var i = 0; i < sheets.length; i++) {
+    var sheet = sheets[i];
+
+    // Check if the sheet name starts with "MK"
+    if (sheet.getName().indexOf("MK") === 0) {
+      var lastRow = sheet.getLastRow();
+      var checkboxColumn = 13; // Assuming checkboxes are in column 13 (M)
+
+      //Logger.log("Checking sheet: " + sheet.getName());
+
+      // Iterate through the rows to find checked checkboxes
+      for (var row = 2; row <= lastRow; row++) {
+        var checkboxCell = sheet.getRange(row, checkboxColumn);
+        var checkboxValue = checkboxCell.getValue();
+
+        // Check if the checkbox is checked
+       //Logger.log("Row " + row + ", Checkbox Value: " + checkboxValue);
+
+        if (checkboxValue === true) {
+         Logger.log("Sheet name: " + sheet.getName());
+          // Return the sheet object if a checked checkbox is found
+          return sheet;
+        }
+      }
+    }
+  }
+  // If no sheet with checked checkboxes is found, return null
+  return null;
+}
+
+/** Conditionally highlight cells when staged for prod and used for prod don't match, set to on edit trigger*/
+function productionMismatch(e) {
+  var sheet = e.source.getActiveSheet();
+  var range = e.range;
+
+  // Check if the change occurred within columns J and K
+  if (sheet.getName().indexOf("MK") === 0 && range.getColumn() >= 10 && range.getColumn() <= 11) {
+    // Get values in columns J and K for the modified row
+    var staged = sheet.getRange(range.getRow(), 10).getValue();
+    var used = sheet.getRange(range.getRow(), 11).getValue();
+   
+
+    // Compare values in columns J and K
+    if (staged === used) {
+      // Clear background color if J is equal to K
+      sheet.getRange(range.getRow(), 10, 1, 2).setBackground(null);
+    } else {
+      // Set background color to blue if J is not equal to K
+      sheet.getRange(range.getRow(), 10, 1, 2).setBackground("#ADD8E6"); // Blue color
+    }
+
+    if (staged != "" && used != ""){
+      var returned = (Number(staged) - Number(used))
+      sheet.getRange(range.getRow(), 12).setValue(returned);
+    }
+  }
+}
+
+
+/** Generate the checkbox at the end of the row after data entry */
+function generateCheckboxInRow() {
+  try {
+    var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    var sheets = spreadsheet.getSheets();
+
+    for (var i = 0; i < sheets.length; i++) {
+      var sheet = sheets[i];
+
+      // Check if the sheet name starts with "MK"
+      if (sheet.getName().indexOf("MK") === 0) {
+        Logger.log("Processing sheet: " + sheet.getName());
+       
+        var activeRange = sheet.getActiveRange();
+        if (activeRange) {
+          var activeRow = activeRange.getRow();
+          Logger.log("Active row: " + activeRow);
+
+          // Only proceed if the active row is greater than 1
+          if (activeRow > 1) {
+            var checkboxCell = sheet.getRange(activeRow, 13, 1, 1); // Cell in 13th column of active row
+            var checkboxValue = checkboxCell.getValue();
+            Logger.log("Checkbox cell value: " + checkboxValue);
+
+            // Check if the checkbox already exists
+            if (checkboxValue !== "") {
+              Logger.log("Checkbox already exists in row " + activeRow);
+              continue;
+            }
+
+            // Generate a new checkbox
+            var rule = SpreadsheetApp.newDataValidation().requireCheckbox().build();
+            checkboxCell.setDataValidation(rule);
+            Logger.log("Checkbox created in row " + activeRow);
+          } else {
+            Logger.log("Active row is 1 or less, skipping");
+          }
+        } else {
+          Logger.log("No active range found");
+        }
+      } else {
+        Logger.log("Sheet name does not start with MK: " + sheet.getName());
+      }
+    }
+  } catch (e) {
+    Logger.log("Error: " + e.toString());
+  }
+}
+
+/** Filter new inventory results */
+function filterInventory() {
+  //updatePartCounts()
+  Logger.log("searching inventory quantities");
+  var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  var inventorySheet = spreadsheet.getSheetByName('updated_quantities');
+  var range = inventorySheet.getDataRange();
+  var values = range.getValues();
+
+  // Keep the header row
+  var headerRow = values.shift();
+ 
+  // Define your filtering criteria
+  var filteredValues = values.filter(function(row) {
+    // Filter rows where the value in column C starts with "Atom Banana" and doesn't contain "Dandee" or "Picking"
+    return /^Atom Banana/.test(row[2]) && row[2].indexOf("Dandee") === -1 && row[2].indexOf("Picking") === -1 && row[2].indexOf("Prepared") === -1;
+  });
+
+  // Sort filtered values by a specific column (e.g., column B) in ascending order
+  filteredValues.sort(function(a, b) {
+    // Sort by the values in column B (index 1)
+    return a[1] - b[1]; // Change this based on the data type of column B (e.g., string, number)
+
+  });
+
+  // Add back the header row
+  filteredValues.unshift(headerRow);
+
+  // Update the sheet with filtered and sorted values
+  range.clearContent(); // Clear existing content
+  inventorySheet.getRange(1, 1, filteredValues.length, filteredValues[0].length).setValues(filteredValues);
+
+  // Set the format of column 'J' to 'text' to prevent scientific notation
+  inventorySheet.getRange('J2:J').setNumberFormat('@STRING@');
+
+
+  // Calculate the sum of 'on_hand' values for each 'part_number' and place the result in column L
+  var totals = {};
+  filteredValues.forEach(function(row) {
+    var partNumber = row[0]; // Assuming 'part_number' is in column A (index 0)
+    var onHand = row[3]; // Assuming 'on_hand' is in column D (index 3)
+
+    // Initialize the total to 0 if it doesn't exist
+    if (!totals[partNumber]) {
+      totals[partNumber] = 0;
+    }
+
+    // Add 'on_hand' value to the total for the corresponding 'part_number'
+    totals[partNumber] += onHand;
+  });
+
+  // Duplicate the total on hand values by part number
+  var duplicatedTotals = [];
+  filteredValues.forEach(function(row, index) {
+    if (index === 0) {
+      duplicatedTotals.push(['Total On Hand']); // Header for totals column
+    } else {
+      var partNumber = row[0]; // Assuming 'part_number' is in column A (index 0)
+      duplicatedTotals.push([totals[partNumber]]); // Add the total on hand value for the corresponding part number
+    }
+  });
+
+  // Write the duplicated totals to column L
+  inventorySheet.getRange(1, 12, duplicatedTotals.length, 1).setValues(duplicatedTotals);
+
+  // Add the column header for checkboxes
+  inventorySheet.getRange('M1').setValue('Use as Sub');
+
+
+  // Create checkboxes in column M
+  var checkboxRange = inventorySheet.getRange(2, 13, filteredValues.length - 1, 1);
+  var checkboxRule = SpreadsheetApp.newDataValidation().requireCheckbox().build();
+  checkboxRange.setDataValidation(checkboxRule);
+
+ 
+  //Add a column header for vendor uom
+  inventorySheet.getRange('N1').setValue('Vendor UOM');
+  // Format the entire column N as a number
+  inventorySheet.getRange('N2:N').setNumberFormat('0');
+// Ensure all values in column 'J' are treated as text
+  inventorySheet.getRange('J2:J' + inventorySheet.getLastRow()).setNumberFormat('@STRING@');
+
+}
+
+/** Identify parts that will likely need a sub */
+function lookForSubs() {
+  var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  var sheets = spreadsheet.getSheets();
+
+  for (var i = 0; i < sheets.length; i++) {
+    var sheet = sheets[i];
+    var sheetName = sheet.getName();
+
+    if (sheetName.indexOf("MK") === 0) {
+      var lastRow = sheet.getLastRow();
+      var range = sheet.getRange(2, 1, lastRow - 1, 20); // Adjust the range to cover all relevant columns (assuming columns A to T)
+      var values = range.getValues();
+      var backgrounds = range.getBackgrounds(); // Get the current background colors
+
+      for (var j = 0; j < values.length; j++) {
+        var row = values[j];
+        var pickPartNumber = row[2];
+        var pickQty = parseInt(row[4]); // Column E (index 4)
+        var totalOnHand = parseInt(row[18]); // Column S (index 18)
+
+        if (pickQty > totalOnHand) {
+          var rowNumber = j + 2; // Adjust for 0-based index and header row
+          var rangeToHighlight = sheet.getRange(rowNumber, 1, 1, 20); // Range for the entire row
+          rangeToHighlight.setBackground("#fb6f92");
+        } else if (pickQty < totalOnHand && backgrounds[j][0] == "#fb6f92") {
+          var rowNumber = j + 2; // Adjust for 0-based index and header row
+          var rangeToUnhighlight = sheet.getRange(rowNumber, 1, 1, 20); // Range for the entire row
+          rangeToUnhighlight.setBackground(null);
+        }
+      }
+    }
+  }
+}
+
+
+
+/** Inventory Comparison */
+function inventoryCheck() {
+    var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    var inventorySheet = spreadsheet.getSheetByName('updated_quantities');
+    var masterDataSheet = spreadsheet.getSheetByName("master_data");
+    var inventoryDataValues = inventorySheet.getRange(2, 1, inventorySheet.getLastRow() - 1, 15).getValues();
+    var masterDataValues = masterDataSheet.getRange(2, 1, masterDataSheet.getLastRow() - 1, 22).getValues();
+    var inventoryUpdate = [];
+    var conditionsArray = [];
+    var inventoryPartNumber, inventoryLocation, inventoryQty, inventoryTotalQty, newQtyCase;
+
+    // Clear old master inventory and get old inventory data
+    var oldInventory = clearOldMasterInventory();
+
+    // Create a map to store master data by part number and lot number for quick access
+    var masterDataMap = {};
+    masterDataValues.forEach(function(row) {
+        var partNumber = row[4]; // Assuming column E (index 4) contains the part number
+        var lotNumber = row[2]; // Assuming column C (index 2) contains the lot number
+        masterDataMap[partNumber + '-' + lotNumber] = row;
+    });
+
+    // Loop through inventory data
+    inventoryDataValues.forEach(function(inventoryRow) {
+        inventoryPartNumber = inventoryRow[0];
+        var inventoryLotNumber = inventoryRow[9];
+        inventoryQty = inventoryRow[3];
+        inventoryLocation = inventoryRow[2];
+        inventoryTotalQty = inventoryRow[11];
+        inventoryVendorUOM = inventoryRow[13];
+
+        var masterRow = masterDataMap[inventoryPartNumber + '-' + inventoryLotNumber];
+
+        if (masterRow) {
+            var masterQty = masterRow[18]; // Assuming column S (index 18) contains the quantity
+
+            var masterMoNumber = masterRow[0];
+            var masterLocation = masterRow[1]; // Assuming column B (index 1) contains the location
+            var masterTotalQty = masterRow[20];
+            var masterPartNumber = masterRow[4];
+            var masterLotNumber = masterRow[2];
+            var masterVendorUOM = masterRow[8];
+            var masterPartCount = masterRow[15];
+
+            if (masterMoNumber !== " ") {
+                if (inventoryQty !== masterQty || inventoryLocation !== masterLocation || inventoryVendorUOM !== null || inventoryTotalQty !== masterTotalQty) {
+
+                    // Update master data values
+                    masterRow[18] = inventoryQty;
+                    masterRow[1] = inventoryLocation;
+                    masterRow[20] = inventoryTotalQty;
+
+                    if (masterRow[8] === " ") {
+                        masterRow[8] = inventoryVendorUOM;
+                    }
+
+                    var newQtyCase = (masterVendorUOM && inventoryQty) ? (inventoryQty / masterVendorUOM) : null;
+                    var newTotalCase = (masterVendorUOM && inventoryTotalQty) ? (inventoryTotalQty / masterVendorUOM) : null;
+                    masterRow[19] = newQtyCase;
+                    masterRow[21] = newTotalCase;
+
+                    // Push updated data to the array
+                    inventoryUpdate.push([masterMoNumber, inventoryLocation, inventoryPartNumber, masterVendorUOM, masterPartCount, inventoryQty, inventoryTotalQty, newQtyCase, newTotalCase]);
+                }
+            }
+        } else {
+            conditionsArray.push(inventoryRow);
+        }
+    });
+
+    if (conditionsArray.length > 0) {
+        newInventory(conditionsArray, masterDataValues);
+    }
+
+    // Include old inventory data in the inventoryUpdate array
+    inventoryUpdate = inventoryUpdate.concat(oldInventory);
+
+    // Batch update master data sheet with new values
+    masterDataSheet.getRange(2, 1, masterDataValues.length, 22).setValues(masterDataValues);
+
+    formatMasterData();
+    newPartCounts();
+    updateOnHand(inventoryUpdate);
+}
+
+
+function createMasterDataMap(masterDataValues) {
+    var masterDataMap = {};
+    masterDataValues.forEach(function(row) {
+        var moNumber = row[0];
+        var partNumber = row[4];
+        var lotNumber = row[2];
+        var description = row[5];
+        masterDataMap[partNumber + '-' + lotNumber + '-' + description] = row;
+    });
+    return masterDataMap;
+}
+
+function createInventoryDataMap(inventoryDataValues) {
+    var inventoryDataMap = {};
+    inventoryDataValues.forEach(function(inventoryRow) {
+        var inventoryPartNumber = inventoryRow[0];
+        var inventoryLotNumber = inventoryRow[9];
+        inventoryDataMap[inventoryPartNumber + '-' + inventoryLotNumber] = true;
+    });
+    return inventoryDataMap;
+}
+
+function createInventoryPartNumberMap(inventoryDataValues) {
+    var inventoryPartNumberMap = {};
+    inventoryDataValues.forEach(function(inventoryRow) {
+        var inventoryPartNumber = inventoryRow[0];
+        var inventoryLotNumber = inventoryRow[9];
+        if (!inventoryPartNumberMap[inventoryPartNumber]) {
+            inventoryPartNumberMap[inventoryPartNumber] = [];
+        }
+        inventoryPartNumberMap[inventoryPartNumber].push(inventoryLotNumber);
+    });
+    return inventoryPartNumberMap;
+}
+
+
+/** Data in Master and not Inventory  */
+function clearOldMasterInventory() {
+    var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    var inventorySheet = spreadsheet.getSheetByName('updated_quantities');
+    var masterDataSheet = spreadsheet.getSheetByName("master_data");
+   
+    var inventoryDataValues = inventorySheet.getRange(2, 1, inventorySheet.getLastRow() - 1, 12).getValues();
+    var masterDataValues = masterDataSheet.getRange(2, 1, masterDataSheet.getLastRow() - 1, 22).getValues();
+    var oldInventory = [];
+
+    // Create an object to store inventory data by part number and lot number for quick access
+    var inventoryDataMap = {};
+    var inventoryPartNumberMap = {};
+
+    inventoryDataValues.forEach(function(inventoryRow) {
+        var inventoryPartNumber = inventoryRow[0];
+        var inventoryLotNumber = inventoryRow[9];
+        var key = inventoryPartNumber + '-' + inventoryLotNumber;
+
+        // Store row in the map
+        inventoryDataMap[key] = inventoryRow;
+
+        // Store part numbers
+        if (!inventoryPartNumberMap[inventoryPartNumber]) {
+            inventoryPartNumberMap[inventoryPartNumber] = [];
+        }
+        inventoryPartNumberMap[inventoryPartNumber].push(inventoryLotNumber);
+    });
+
+    // Iterate through master data
+    masterDataValues.forEach(function(row, index) {
+        var masterPartNumber = row[4];
+        var masterLotNumber = row[2];
+        var key = masterPartNumber + '-' + masterLotNumber;
+
+        // Check if the key exists in the inventory data map
+        if (!inventoryDataMap[key]) {
+            // Check if the part number exists in both tabs but lot number does not match
+            if (inventoryPartNumberMap[masterPartNumber]) {
+                var lotNumbers = inventoryPartNumberMap[masterPartNumber];
+                if (!lotNumbers.includes(masterLotNumber)) {
+                    // Update master data values
+                    masterDataValues[index][18] = 0; // masterOnHandQty
+                    masterDataValues[index][19] = 0; // masterCases
+                    masterDataValues[index][20] = 0; // masterTotalQty
+                    masterDataValues[index][21] = 0; // masterTotalCases
+
+                    oldInventory.push([
+                        row[0], // masterMoNumber
+                        row[1], // masterLocation
+                        masterPartNumber,
+                        row[8], // masterVendorUOM
+                        row[15], // masterPartCount
+                        0, // masterOnHandQty
+                        0, // masterTotalQty
+                        0, // masterCases
+                        0  // masterTotalCases
+                    ]);
+
+                    //Logger.log('Part Number: ' + masterPartNumber + ' Lot Number: ' + masterLotNumber + ' grouped into EOM counts');
+                }
+            } else {
+                // Part number does not exist in inventory data at all
+                // Update master data values
+                masterDataValues[index][18] = 0; // masterOnHandQty
+                masterDataValues[index][19] = 0; // masterCases
+                masterDataValues[index][20] = 0; // masterTotalQty
+                masterDataValues[index][21] = 0; // masterTotalCases
+
+                oldInventory.push([
+                    row[0], // masterMoNumber
+                    row[1], // masterLocation
+                    masterPartNumber,
+                    row[8], // masterVendorUOM
+                    row[15], // masterPartCount
+                    0, // masterOnHandQty
+                    0, // masterTotalQty
+                    0, // masterCases
+                    0  // masterTotalCases
+                ]);
+
+                Logger.log('Part Number: ' + masterPartNumber + ' Lot Number: ' + masterLotNumber + ' no longer in inventory');
+            }
+        }
+    });
+
+    // Batch update master data sheet with new values
+    masterDataSheet.getRange(2, 1, masterDataValues.length, masterDataValues[0].length).setValues(masterDataValues);
+
+    return oldInventory;
+}
+
+
+/** UPDATE NEW INVENTORY DATA IN MASTER DATA TAB */
+function newPartCounts() {
+    var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    var masterDataSheet = spreadsheet.getSheetByName("master_data");
+    var dataRange = masterDataSheet.getDataRange();
+    var values = dataRange.getValues();
+
+    for (var j = 1; j < values.length; j++) {
+        var moNumber = values[j][0];
+        var pickQty = values[j][6];
+        var partNumber = values[j][4];
+        var previousMoNumber = values[j - 1][0];
+        var previousPartNumber = values[j - 1][4];
+        var lotCode = values[j][2];
+        var partCount = values[j][15];
+        var previousPartCount = values[j - 1][15];
+
+        if ((moNumber === previousMoNumber && !pickQty && previousPartNumber === partNumber) ||(moNumber === previousMoNumber && previousPartNumber === partNumber && !partCount) || (moNumber === previousMoNumber && previousPartNumber === partNumber && partCount === previousPartCount)) {
+            Logger.log('updating part count for : ' + partNumber );
+
+            var onHandQty = values[j][18];
+            var totalOnHand = values[j][20];
+
+            var previousPickQty = values[j - 1][6];
+            var previousPartUOM = values[j - 1][7];
+            var previousVendorUOM = values[j - 1][8];
+            var previousCasesNeeded = values[j - 1][9];
+            var previousCasesRounded = values[j - 1][10];
+            var previousPartCount = values[j - 1][15];
+
+            values[j][6] = previousPickQty;
+            values[j][7] = previousPartUOM;
+            values[j][8] = previousVendorUOM;
+            values[j][9] = previousCasesNeeded;
+            values[j][10] = previousCasesRounded;
+            values[j][15] = Number(previousPartCount) + 1;
+
+            var newCasesonHand = (previousVendorUOM && onHandQty) ? (onHandQty / previousVendorUOM) : null;
+            var newTotalCasesOnHand = (previousVendorUOM && totalOnHand) ? (totalOnHand / previousVendorUOM) : null;
+
+            values[j][19] = newCasesonHand;
+            values[j][21] = newTotalCasesOnHand;
+
+            var rangeToHighlight = masterDataSheet.getRange(j + 1, 1, 1, values[j].length);
+            rangeToHighlight.setBackground("#fb6f92");
+        }
+    }
+
+    dataRange.setValues(values);
+}
+
+/** UPDATE ON HAND VALUES IN MK SHEETS */
+function updateOnHand(inventoryUpdate) {
+    var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    var sheets = spreadsheet.getSheets();
+
+    // Object to store arrays based on masterMoNumber
+    var arrays = {};
+   
+    // Loop through inventoryUpdate array
+    for (var k = 0; k < inventoryUpdate.length; k++) {
+        var info = inventoryUpdate[k];
+        var masterMoNumber = info[0];
+        var inventoryLocation = info[1];
+        var inventoryPartNumber = info[2];
+        var masterVendorUOM = info[3];
+        var masterPartCount = info[4];
+        var inventoryQty = info[5]; //on hand amount
+        var newQtyCase = info[7]; // cases on hand
+        var inventoryTotalQty = info[6]; // total on hand
+        var newTotalCase = info[8]; // grand total on hand
+
+        // Check if the array for this masterMoNumber exists, if not, create it
+        if (!arrays[masterMoNumber]) {
+            arrays[masterMoNumber] = [];
+        }
+
+        // Push the info to the array for this masterMoNumber
+        arrays[masterMoNumber].push([masterMoNumber, inventoryLocation, inventoryPartNumber, masterVendorUOM, masterPartCount, inventoryQty, inventoryTotalQty, newQtyCase, newTotalCase]);
+    }
+
+    // Loop through sheets
+    for (var i = 0; i < sheets.length; i++) {
+        var mkSheet = sheets[i];
+        var mkSheetName = mkSheet.getName();
+
+        // Skip sheets with specific names
+        if (mkSheetName === 'master_data' || mkSheetName === 'import_template_ab' || mkSheetName === 'updated_quantities') {
+            continue;
+        }
+
+        // Check if mkSheetName starts with any of the keys (masterMoNumber values) in the arrays object
+        for (var key in arrays) {
+            if (mkSheetName.indexOf(key) === 0) {
+                var data = mkSheet.getDataRange().getValues();
+                var numRows = data.length;
+
+                // Loop through rows in MK sheet
+                for (var j = 1; j < numRows; j++) {
+                    var mkPartNumber = data[j][2]; // column C
+                    var mkPartCount = parseInt(data[j][13]); // column N
+                    var mkPartUOM = data[j][5];
+                    var mkVendorUOM = data[j][6];
+                    var mkOnHandQty = data[j][16]; // column Q
+                    var mkOnHandCases = data[j][17]; // column R
+                    var mkLocation = data[j][1]; // column B
+                    var mkTotalOnHand = data[j][18]; // column S
+                    var mkTotalCasesOnHand = data[j][19]; // column T
+
+                    // Loop through the masterDataValues array based on the masterMoNumber
+                    var arrayForMoNumber = arrays[key];
+                    for (var k = 0; k < arrayForMoNumber.length; k++) {
+                        var info = arrayForMoNumber[k];
+                        var arrayLocation = info[1]; // location
+                        var masterPartNumber = info[2]; // Part number
+                        var arrayVendorUOM = info[3]; // numerical value
+                        var masterPartCount = info[4];                      
+                        var arrayQty = info[5]; // On-hand quantity
+                        var masterTotalOnHand = info[6]; // total on hand
+                        var arrayCases = info[7]; // cases                      
+                        var masterTotalCases = info[8]; // total cases
+
+                        // Check if the current MK row matches with the master data
+                        if (mkPartNumber === masterPartNumber && mkPartCount === masterPartCount) {
+                            Logger.log(mkPartNumber + ", " + masterPartNumber);
+
+                            // Function to check and update cell if value has changed
+                            function updateCellIfChanged(sheet, row, column, newValue, backgroundColor) {
+                                // Get the current value from the sheet
+                                var currentValue = sheet.getRange(row, column).getValue();
+                               
+                                // Always update the cell value
+                                sheet.getRange(row, column).setValue(newValue);
+                               
+                                // Change the background color if the new value is different from the current value
+                                if (currentValue !== newValue) {
+                                    sheet.getRange(row, column).setBackground(backgroundColor);
+                                } else {
+                                    // Ensure the background is reset to default if the values are the same
+                                    sheet.getRange(row, column).setBackground(null);
+                                }
+                            }
+
+                            // Update values in MK sheet if they have changed
+                            updateCellIfChanged(mkSheet, j + 1, 2, arrayLocation, "#a7c957");
+                            updateCellIfChanged(mkSheet, j + 1, 17, arrayQty, "#a7c957");
+                            updateCellIfChanged(mkSheet, j + 1, 18, arrayCases, "#a7c957");
+                            updateCellIfChanged(mkSheet, j + 1, 19, masterTotalOnHand, "#a7c957");
+                            updateCellIfChanged(mkSheet, j + 1, 20, masterTotalCases, "#a7c957");
+
+                            // Break the loop if you found a match
+                            break;
+                        }
+
+                        if (mkPartNumber === masterPartNumber && mkPartUOM === null && masterPartCount === 1) {
+                            Logger.log(mkPartNumber + ", " + masterPartNumber);
+
+                            // Update values in MK sheet if they have changed
+                            updateCellIfChanged(mkSheet, j + 1, 6, arrayPartUOM, "#a7c957");
+                            updateCellIfChanged(mkSheet, j + 1, 7, arrayVendorUOM, "#a7c957");
+                            updateCellIfChanged(mkSheet, j + 1, 17, arrayQty, "#a7c957");
+                            updateCellIfChanged(mkSheet, j + 1, 18, arrayCases, "#a7c957");
+                            updateCellIfChanged(mkSheet, j + 1, 19, masterTotalOnHand, "#a7c957");
+                            updateCellIfChanged(mkSheet, j + 1, 20, masterTotalCases, "#a7c957");
+
+                            // Break the loop if you found a match
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Display a message box
+    Browser.msgBox("Inventory has been updated.");
+}
+
+
+
+function newInventory(conditionsArray, masterDataValues) {
+    var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    var inventorySheet = spreadsheet.getSheetByName('updated_quantities');
+    var masterDataSheet = spreadsheet.getSheetByName("master_data");
+
+    var newInventoryDataRange = inventorySheet.getRange(2, 1, conditionsArray.length, 12);
+    Logger.log('adding new inventory' + newInventoryDataRange)
+
+    for (var i = 0; i < conditionsArray.length; i++) {
+        var inventoryRow = conditionsArray[i];
+        var inventoryPartNumber = inventoryRow[0];
+        var inventoryLotNumber = inventoryRow[9];
+        var inventoryExpiration = inventoryRow[10]
+        var inventoryQty = inventoryRow[3];
+        var inventoryPartUOM = inventoryRow[4];
+        var inventoryLocation = inventoryRow[2];
+        var inventoryDescription = inventoryRow[1];
+        var inventoryTotalQty = inventoryRow[11];
+        var inventoryVendorUOM = inventoryRow[13];
+
+        // Collect MO numbers for the current part number from master data
+        var moNumbers = [];
+        for (var j = 0; j < masterDataValues.length; j++) {
+            var masterRow = masterDataValues[j];
+            var masterPartNumber = masterRow[4]; // Assuming part number is in the 5th column
+            if (masterPartNumber === inventoryPartNumber) {
+                var moNumber = masterRow[0]; // Assuming MO number is in the 1st column
+                if (moNumbers.indexOf(moNumber) === -1) {
+                    moNumbers.push(moNumber);
+                }
+            }
+        }
+
+        // Check the number of unique MO numbers
+        if (moNumbers.length === 1) {
+            // Only one unique MO number, perform action X
+            var newRow = [
+                moNumbers[0], // Use the existing MO number
+                inventoryLocation,
+                inventoryLotNumber,
+                inventoryExpiration,
+                inventoryPartNumber,
+                inventoryDescription,
+                '',
+                inventoryPartUOM,
+                '',
+                '', // Master Vendor UOM
+                '', // Master Part Count
+                '',
+                '',
+                '',
+                '',
+                '',
+                '',
+                '',
+                inventoryQty,
+                '', // New Qty Case
+                inventoryTotalQty,
+                '' // New Total Case
+            ];
+
+            var lastRow = masterDataSheet.getLastRow() + 1;
+            masterDataSheet.getRange(lastRow, 1, 1, newRow.length).setValues([newRow]);
+        } else if (moNumbers.length === 2) {
+            // Two unique MO numbers, duplicate the part and set MO numbers accordingly
+            for (var k = 0; k < moNumbers.length; k++) {
+                var newRow = [
+                    moNumbers[k], // Use each unique MO number
+                    inventoryLocation,
+                    inventoryLotNumber,
+                    inventoryExpiration,
+                    inventoryPartNumber,
+                    inventoryDescription,
+                    '',
+                    inventoryPartUOM,
+                    '',
+                    '', // Master Vendor UOM
+                    '', // Master Part Count
+                    '',
+                    '',
+                    '',
+                    '',
+                    '',
+                    '',
+                    '',
+                    inventoryQty,
+                    '', // New Qty Case
+                    inventoryTotalQty,
+                    '' // New Total Case
+                ];
+
+                var lastRow = masterDataSheet.getLastRow() + 1;
+                masterDataSheet.getRange(lastRow, 1, 1, newRow.length).setValues([newRow]);
+            }
+        } else {
+                var newRow = [
+                ' ', // Use the existing MO number
+                inventoryLocation,
+                inventoryLotNumber,
+                inventoryExpiration,
+                inventoryPartNumber,
+                inventoryDescription,
+                '',
+                inventoryPartUOM,
+                '',
+                '', // Master Vendor UOM
+                '', // Master Part Count
+                '',
+                '',
+                '',
+                '',
+                '',
+                '',
+                '',
+                inventoryQty,
+                '', // New Qty Case
+                inventoryTotalQty,
+                '' // New Total Case
+            ];
+
+            var lastRow = masterDataSheet.getLastRow() + 1;
+            masterDataSheet.getRange(lastRow, 1, 1, newRow.length).setValues([newRow]);
+        }
+    }
+}
+
+/** Updates part counts based on the master_data sheet */
+// function updatePartCounts() {
+//   var ss = SpreadsheetApp.getActiveSpreadsheet();
+//   var masterSheet = ss.getSheetByName("master_data");
+
+//   if (!masterSheet) {
+//     Logger.log("master_data sheet not found.");
+//     return;
+//   }
+
+//   // Get all sheets that start with "MK"
+//   var mkSheets = ss.getSheets().filter(sheet => sheet.getName().startsWith("MK"));
+
+//   if (mkSheets.length === 0) {
+//     Logger.log("No sheet starting with 'MK' found.");
+//     return;
+//   }
+
+//   // Sort sheets by name (assuming the sheet names contain dates in a format that sorts correctly)
+//   mkSheets.sort((a, b) => {
+//     var dateA = new Date(a.getName().split(" ")[1]); // Extract date from name (e.g., "MK 2054 3/24/2025")
+//     var dateB = new Date(b.getName().split(" ")[1]);
+//     return dateB - dateA; // Sort in descending order (most recent first)
+//   });
+
+//   // Log the selected MK sheet (most recent)
+//   var selectedMkSheet = mkSheets[0];
+//   Logger.log("Selected MK sheet: " + selectedMkSheet.getName());
+
+//   var masterData = masterSheet.getDataRange().getValues();
+//   var rowCount = masterData.length;
+
+//   // Create a map to store the largest part_count for each part_number
+//   var partCountMap = {};
+
+//   // Loop through master_data to find the largest part_count for each part_number
+//   for (var i = 1; i < rowCount; i++) { // Assuming first row is header
+//     var partNumber = masterData[i][4]; // Column E (zero-based index 4)
+//     var partCount = masterData[i][15];
+
+//     if (partNumber) { // Ensure partNumber exists
+//       var parsedPartCount = parseInt(partCount) || 0; // Convert to integer, default to 0 if NaN
+//       if (!(partNumber in partCountMap) || parsedPartCount > partCountMap[partNumber]) {
+//         partCountMap[partNumber] = parsedPartCount; // Store the largest part_count for this part_number
+//       }
+//     }
+//   }
+
+//   // Check if selectedMkSheet has rows of data
+//   var mkData = selectedMkSheet.getDataRange().getValues();
+//   if (mkData.length <= 1) {
+//     Logger.log("No data in selected MK sheet or it only contains the header.");
+//     return;
+//   }
+
+//   // Loop through the MK sheet rows and update the part_count for each corresponding part_number
+//   for (var j = 1; j < mkData.length; j++) { // Assuming first row is header
+//     var mkPartNumber = mkData[j][2]; // Column C (zero-based index 2) in MK sheet (adjust if needed)
+   
+//     if (mkPartNumber && partCountMap[mkPartNumber] !== undefined) {
+//       // Update the part_count column in MK sheet (assuming it's column P, index 15)
+//       selectedMkSheet.getRange(j + 1, 14).setValue(partCountMap[mkPartNumber]); // +1 because the range is 1-based
+//     }
+//   }
+
+//   Logger.log("Part counts updated for MK sheet: " + selectedMkSheet.getName());
+// }
+
+
+// function syncMoveCheckboxes(sheetName) {
+//   // get sheet and metadata
+//   var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+//   if (!sheet) {
+//     Logger.log("Sheet not found: " + sheetName);
+//     return;
+//   }
+ 
+//   // get header values from the first row
+//   var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+//   var ufpColIndex = headers.indexOf("Used for Production") + 1;  // 1-based index
+//   var moveColIndex = headers.indexOf("Move") + 1;
+ 
+//   if (ufpColIndex === 0 || moveColIndex === 0) {
+//     Logger.log("Required columns not found.");
+//     return;
+//   }
+ 
+//   // find the last row with data (starting at row 2, since row 1 is header)
+//   var lastRow = sheet.getLastRow();
+//   if (lastRow < 2) return;
+ 
+//   // get the entire UFP range (from row 2 to last row)
+//   var ufpRange = sheet.getRange(2, ufpColIndex, lastRow - 1, 1);
+//   var ufpValues = ufpRange.getValues();
+ 
+//   // get the entire Move range (from row 2 to last row)
+//   var moveRange = sheet.getRange(2, moveColIndex, lastRow - 1, 1);
+ 
+//   // make an array for new Move values
+//   var newMoveValues = [];
+ 
+//   // loop through each UFP cell
+//   for (var i = 0; i < ufpValues.length; i++) {
+//     var cellValue = ufpValues[i][0];
+//     // checkbox logic.
+//     if (cellValue && cellValue.toString().trim() !== "") {
+//       newMoveValues.push([true]);  // checked
+//     } else {
+//       newMoveValues.push([""]);    // clear the cell
+//     }
+//   }
+ 
+//   // set the new Move values back to the sheet
+//   moveRange.setValues(newMoveValues);
+ 
+//   // mini check
+//   // reapply checkbox data validation to the entire Move range if needed:
+//   var rule = SpreadsheetApp.newDataValidation().requireCheckbox().build();
+//   moveRange.setDataValidation(rule);
+ 
+//   Logger.log("Sync complete on sheet: " + sheetName);
+
+//   // correctly check/uncheck the first selected cell if it exists
+//   if (firstAffectedRow !== null) {
+//     var firstUfpCell = sheet.getRange(firstAffectedRow, ufpColIndex);
+//     var firstMoveCell = sheet.getRange(firstAffectedRow, moveColIndex);
+//     var firstUfpValue = firstUfpCell.getValue();
+
+//     firstMoveCell.setValue(firstUfpValue && firstUfpValue.toString().trim() !== "" ? true : "");
+//     firstMoveCell.setDataValidation(rule);
+   
+//     Logger.log("Rechecked first affected row: " + firstAffectedRow);
+//   }
+// }
+
+
+function onEdit(e) {
+  if (!e) return;
+
+  var range = e.range;
+  var sheet = range.getSheet();
+  var sheetName = sheet.getName();
+
+  // if (sheetName.startsWith('MK')) {
+  //   var sheet = e.source.getActiveSheet();
+
+  //   syncMoveCheckboxes(sheetName);
+  //   var col = range.getColumn();
+  //   var row = range.getRow();
+   
+  //   // get header row values to find column indexes
+  //   var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  //   var usedForProductionCol = headers.indexOf("Used for Production") + 1;
+  //   var moveCol = headers.indexOf("Move") + 1;
+
+   
+   
+  //   // only act if the edited cell is in the UFP column (not header)
+  //   if (col === usedForProductionCol && row > 1) {
+  //     var uopCell = sheet.getRange(row, usedForProductionCol);
+  //     var moveCell = sheet.getRange(row, moveCol);
+     
+  //     // clear the UOP cell if it contains any value
+  //     if (uopCell.getValue() !== "") {
+  //       uopCell.clearContent();
+  //     }
+     
+  //     // ensure the Move cell has checkbox validation
+  //     var dv = moveCell.getDataValidation();
+  //     if (!dv || dv.getCriteriaType() !== SpreadsheetApp.DataValidationCriteria.CHECKBOX) {
+  //       var rule = SpreadsheetApp.newDataValidation().requireCheckbox().build();
+  //       moveCell.setDataValidation(rule);
+  //     }
+     
+  //     // Checks box only if the user has just entered a value in UFP
+  //     // UFP was cleared above, so check if the edit event has a new value
+  //     var newValue = e.value; // This is the new value entered (if any)
+  //     if (newValue && newValue.toString().trim() !== "") {
+  //       // set UOP to new value and check the checkbox
+  //       uopCell.setValue(newValue);
+  //       moveCell.setValue(true);
+  //     } else {
+  //       // otherwise, leave UFP empty and uncheck the checkbox
+  //       moveCell.setValue(false);
+  //     }
+  //   }
+  // }
+
+    if (sheetName === 'updated_quantities') {
+        var col = range.getColumn();
+        var row = range.getRow();
+
+        if (col === 4 && row > 1) {
+            var inventorySheet = sheet;
+            var inventoryPartNumber = inventorySheet.getRange(row, 1).getValue();
+            var inventoryLotNumber = inventorySheet.getRange(row, 10).getValue();
+            var inventoryLocation = inventorySheet.getRange(row, 3).getValue();
+            var inventoryQty = inventorySheet.getRange(row, 4).getValue();
+            var inventoryPartUOM = inventorySheet.getRange(row, 5).getValue();
+            var inventoryDescription = inventorySheet.getRange(row, 2).getValue();
+            var inventoryTotalQty = inventorySheet.getRange(row, 12).getValue();
+            var inventoryVendorUOM = inventorySheet.getRange(row, 14).getValue();
+
+            var key = inventoryPartNumber + '-' + inventoryLotNumber + '-' + inventoryDescription;
+            var masterDataSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('master_data');
+            var masterDataRange = masterDataSheet.getDataRange();
+            var masterDataValues = masterDataRange.getValues();
+
+            var masterRow = masterDataValues.find(function(row) {
+                return row[4] === inventoryPartNumber && row[2] === inventoryLotNumber;
+            });
+
+            if (masterRow) {
+                masterRow[18] = inventoryQty;
+                masterRow[1] = inventoryLocation;
+
+                var newQtyCase = (inventoryVendorUOM && inventoryQty) ? (inventoryQty / inventoryVendorUOM) : null;
+                masterRow[19] = newQtyCase;
+
+                var newTotalCase = (inventoryVendorUOM && inventoryTotalQty) ? (inventoryTotalQty / inventoryVendorUOM) : null;
+                masterRow[21] = newTotalCase;
+
+                masterDataRange.setValues(masterDataValues);
+                formatMasterData();
+            } else {
+                var newRow = [
+                    '', // Master MO Number
+                    inventoryLocation,
+                    inventoryLotNumber,
+                    inventoryPartNumber,
+                    inventoryPartUOM,
+                    '', // Master Vendor UOM
+                    '', // Master Part Count
+                    inventoryQty,
+                    '', // New Qty Case
+                    inventoryTotalQty,
+                    '' // New Total Case
+                ];
+
+                var lastRow = masterDataSheet.getLastRow() + 1;
+                masterDataSheet.getRange(lastRow, 1, 1, newRow.length).setValues([newRow]);
+            }
+        }
+    }
+}
+
+
+/** Sort the Master Data Tab */
+function formatMasterData() {
+    var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    var masterDataSheet = spreadsheet.getSheetByName("master_data");
+    var range = masterDataSheet.getDataRange();
+    var values = range.getValues();
+
+    // Keep the header row
+    var headerRow = values.shift();
+
+    // Sort the data rows
+    values.sort(function(a, b) {
+        // First, sort by MO number (column A) in descending order
+        if (a[0] > b[0]) {
+            return -1;
+        } else if (a[0] < b[0]) {
+            return 1;
+        } else {
+            // If MO Numbers are equal, sort by Part Number (column E)
+            if (a[4] < b[4]) {
+                return -1;
+            } else if (a[4] > b[4]) {
+                return 1;
+            } else {
+                // If Part Numbers are also equal, handle sorting by Part Count and Lot Code
+                var partCountA = a[15];
+                var partCountB = b[15];
+
+                // Handle PartCount 1 separately
+                if (partCountA === 1 && partCountB !== 1) {
+                    return -1;
+                } else if (partCountA !== 1 && partCountB === 1) {
+                    return 1;
+                } else if (partCountA === null && partCountB !== null) {
+                    return -1;
+                } else if (partCountA !== null && partCountB === null) {
+                    return 1;
+                } else if (partCountA === null && partCountB === null) {
+                    // If both are null, sort by Lot Code (column C) with "XXX" or "xxx" coming first
+                    var lotA = a[2] ? a[2].toString().toLowerCase() : '';
+                    var lotB = b[2] ? b[2].toString().toLowerCase() : '';
+                   
+                    var isALotX = lotA.startsWith('xxx') || lotA.startsWith('xxx');
+                    var isBLotX = lotB.startsWith('xxx') || lotB.startsWith('xxx');
+                   
+                    if (isALotX && !isBLotX) {
+                        return -1;
+                    } else if (!isALotX && isBLotX) {
+                        return 1;
+                    } else {
+                        // If both Lot Codes are either X-prefixed or not, compare them lexically
+                        if (lotA < lotB) {
+                            return -1;
+                        } else if (lotA > lotB) {
+                            return 1;
+                        } else {
+                            // If Lot Codes are also equal, sort by Expiration Date (column D)
+                            if (a[3] < b[3]) {
+                                return -1;
+                            } else if (a[3] > b[3]) {
+                                return 1;
+                            } else {
+                                return 0;
+                            }
+                        }
+                    }
+                } else {
+                    // Sort by Part Count numerically if Part Counts are not null
+                    partCountA = partCountA === null ? Infinity : partCountA;
+                    partCountB = partCountB === null ? Infinity : partCountB;
+                    if (partCountA < partCountB) {
+                        return -1;
+                    } else if (partCountA > partCountB) {
+                        return 1;
+                    } else {
+                        // If Part Counts are also equal, sort by Lot Code (column C)
+                        var lotA = a[2] ? a[2].toString().toLowerCase() : '';
+                        var lotB = b[2] ? b[2].toString().toLowerCase() : '';
+                       
+                        // Sort "XXX" or "xxx" first
+                        var isALotX = lotA.startsWith('xxx');
+                        var isBLotX = lotB.startsWith('xxx');
+                        if (isALotX && !isBLotX) {
+                            return -1;
+                        } else if (!isALotX && isBLotX) {
+                            return 1;
+                        } else {
+                            // Compare lexically
+                            if (lotA < lotB) {
+                                return -1;
+                            } else if (lotA > lotB) {
+                                return 1;
+                            } else {
+                                // If Lot Codes are also equal, sort by Expiration Date (column D)
+                                if (a[3] < b[3]) {
+                                    return -1;
+                                } else if (a[3] > b[3]) {
+                                    return 1;
+                                } else {
+                                    return 0;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    // Combine the header row back with the sorted data
+    values.unshift(headerRow);
+
+    // Write the sorted data back to the sheet
+    masterDataSheet.getRange(1, 1, values.length, values[0].length).setValues(values);
+}
+
+
+
+
+/** Move the inventory, take into account short values */
+function moveInventory() {
+    // Find the active sheet with checked checkboxes
+    var mksheet = findActiveSheetWithCheckedCheckbox();
+    var shouldTransferData = true; // Flag to determine if data should be transferred
+
+    // Check if an active sheet with checked checkboxes was found
+    if (mksheet !== null) {
+        var moIndex = 1;
+        var partNumberIndex = 3;
+        var pickQtyIndex = 5;
+        var vendorUOMIndex = 7;
+        var productionIndex = 11;
+        var moveBoxIndex = 13;
+        var partCountIndex = 14;
+        var shortQtyIndex = 15;
+        var onHandIndex = 17;
+        var allOnHandIndex = 19;
+        var startRow = 2;
+
+        // Find the last row with data in the column you're interested in
+        var dataRange = mksheet.getRange(startRow, moIndex, mksheet.getMaxRows(), 1);
+        var values = dataRange.getValues();
+        var finalRow = startRow;
+
+        for (var i = values.length - 1; i >= 0; i--) {
+            if (values[i][0]) {
+                finalRow = i + startRow;
+                break;
+            }
+        }
+
+
+        // Loop through each row
+        for (var j = finalRow; j >= startRow; j--) {
+            var moNumber = mksheet.getRange(j, moIndex).getValue();
+            var partNumber = mksheet.getRange(j, partNumberIndex).getValue();
+            var pickQty = mksheet.getRange(j, pickQtyIndex).getValue();
+            var production = mksheet.getRange(j, productionIndex).getValue();
+            var partCount = mksheet.getRange(j, partCountIndex).getValue();
+            var shortQty = mksheet.getRange(j, shortQtyIndex).getValue();
+            var vendorUOM = mksheet.getRange(j, vendorUOMIndex).getValue();
+            var onHand = mksheet.getRange(j, onHandIndex).getValue();
+            var shortQtyOneRowAbove = mksheet.getRange(j - 1, shortQtyIndex).getValue();
+            var moveBox = mksheet.getRange(j, moveBoxIndex).getValue();
+            var totalOnHand = mksheet.getRange(j, allOnHandIndex).getValue();
+
+
+            // Convert the result to a number and round to 2 decimal places
+            var used_in_prod = (Number(production) * Number(vendorUOM)).toFixed(2);
+
+            // Determine if the quantities are short
+            if (parseFloat(used_in_prod) > parseFloat(onHand)) {
+              if(moveBox){
+                if (partCount == 1 && shortQty == "") {
+                    Logger.log("Entering short function for: " + partNumber);
+                    shortQuantities(j, moNumber, partNumber, partCount, used_in_prod, onHand, shortQty);
+                    shouldTransferData = false; // Set the flag to false if any row meets the condition
+                }
+              }
+            }
+        }
+
+        // Transfer data if the flag is still true
+        if (shouldTransferData) {
+            transferData();
+        }
+    } else {
+        Logger.log('No active sheet with checked checkboxes found.');
+    }
+}
+
+
+/** Quantities are short */
+function shortQuantities(j, moNumber, partNumber, partCount, used_in_prod, onHand) {
+  // Retrieve the active sheet dynamically
+  var mksheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+
+  // Log the sheet name to ensure it is defined
+  //Logger.log("Active sheet name: " + mksheet.getName());
+
+  var difference = (Number(used_in_prod) - Number(onHand));
+  Logger.log('short amount:' + difference)
+
+  // Set the value of the "qty_short" column in the row above the newly inserted row
+  mksheet.getRange(j, 15).setValue(difference); // Note the change in the row index
+
+  // Copy master data to the active sheet
+  copyMasterDataRowToActiveSheet(j, moNumber, partNumber, partCount);
+}
+
+/** COPY DATA FROM MASTER TAB TO ACTIVE SHEET */
+function copyMasterDataRowToActiveSheet(j, moNumber, partNumber, partCount) {
+   try {
+  Logger.log("searching master data");
+  var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  var masterDataSheet = spreadsheet.getSheetByName("master_data");
+  var activeSheet = findActiveSheetWithCheckedCheckbox();
+
+  // Get data from master_data sheet
+  var masterDataValues = masterDataSheet.getDataRange().getValues();
+
+  // Find the matching row in master_data
+  for (var row = 1; row < masterDataValues.length; row++) {
+    var masterDataMoNumber = masterDataValues[row][0];
+    var masterDataPartNumber = masterDataValues[row][4];
+    var masterDataPartCount = masterDataValues[row][15];
+
+    if (masterDataMoNumber === moNumber && masterDataPartNumber === partNumber && parseInt(masterDataPartCount) === parseInt(partCount) + 1) {
+      Logger.log("Found matching part number in master_data tab: " + masterDataPartNumber);
+
+      activeSheet.insertRowAfter(j);
+
+      // Extract specific columns to copy
+      var columnsToCopy = [1, 2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
+      var masterDataRowValues = columnsToCopy.map(function(columnIndex) {
+        return masterDataValues[row][columnIndex - 1];
+      });
+
+      // Paste the selected columns into the active sheet
+      activeSheet.getRange(j + 1, 1, 1, masterDataRowValues.length).setValues([masterDataRowValues]);
+
+      // Find the current row in the active sheet based on MO number and part number
+      var lastRowActiveSheet = activeSheet.getLastRow();
+      var activeRow;
+      for (activeRow = 2; activeRow <= lastRowActiveSheet; activeRow++) {
+        var activeMoNumber = activeSheet.getRange(activeRow, 1).getValue();
+        var activePartNumber = activeSheet.getRange(activeRow, 3).getValue();
+
+        if (activeMoNumber === moNumber && activePartNumber === partNumber) {
+          break;
+        }
+      }
+
+      // If a matching row is found, proceed with further operations
+      if (activeRow <= lastRowActiveSheet) {
+        var nextRow = activeRow + 1;
+
+        // Calculate difference and set values
+        var newPartAvailQtyIndex = 17;
+        var newPartAvailQty = masterDataRowValues[16];
+        var shortQtyOneRowAbove = activeSheet.getRange(activeRow, 15).getValue();
+        var difference = shortQtyOneRowAbove - newPartAvailQty;
+
+        activeSheet.getRange(nextRow, 1, 1, masterDataRowValues.length).setValues([masterDataRowValues]);
+        activeSheet.getRange(nextRow, 15).setValue(difference);
+        activeSheet.getRange(nextRow, 13).setValue(true);
+
+        // Check if shortQty is greater than newPartAvailQty and enter stillShort function
+        if (difference > newPartAvailQty) {
+          Logger.log("Entering stillShort function for: " + partNumber);
+          stillShort(nextRow, moNumber, partNumber, partCount);
+        }
+      }
+     
+      // Exit the loop once the row is copied
+      break;
+    }
+  }
+
+  // If no match found, mark the row in activeSheet
+  if (row >= masterDataValues.length) {
+    var newRange = activeSheet.getRange(j, 1, 1, activeSheet.getLastColumn());
+    newRange.setBackground("#FFFF00"); // Yellow color, adjust as needed
+  }
+
+  moveInventory();
+  } catch (error) {
+    Logger.log("Error in copyMasterDataRowToActiveSheet: " + error.message);
+  }
+}
+
+/** Quantities still short */
+function stillShort(nextRow, moNumber, partNumber, initialPartCount) {
+  try {
+    var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    var masterDataSheet = spreadsheet.getSheetByName("master_data");
+    var activeSheet = findActiveSheetWithCheckedCheckbox();
+    initialPartCount = Number(initialPartCount)
+    var currentActiveRow = nextRow + 1;
+    var nextPartCount = initialPartCount + 1;
+    var partCount = activeSheet.getRange(nextRow, 14).getValue();
+    var difference = Infinity;
+    var processedParts = {}; // Track processed parts
+    var repeatLoop = false;
+ //   Logger.log("searching master data");
+
+    SpreadsheetApp.flush();
+
+    // Find the matching row in master_data
+    var lastRowMasterData = masterDataSheet.getLastRow();
+
+    for (var row = 2; row <= lastRowMasterData; row++) {
+      var masterDataMoNumber = masterDataSheet.getRange(row, 1).getValue();
+      var masterDataPartNumber = masterDataSheet.getRange(row, 5).getValue();
+      var masterDataPartCount = masterDataSheet.getRange(row, 16).getValue();
+        if (repeatLoop === false) {
+          var newPartCount = partCount +1;
+        } else{
+          var newPartCount = initialPartCount +1
+        }      
+
+      // Check for a match based on MO number, part number, and part count
+      if (masterDataMoNumber === moNumber && masterDataPartNumber === partNumber && masterDataPartCount === newPartCount) {
+      //  Logger.log("Found matching part number in master_data tab: " + masterDataPartNumber + ", " + masterDataPartCount);
+
+        // Track processed partNumber and partCount combination
+        var key = masterDataPartNumber + '-' + masterDataPartCount;
+        if (processedParts[key]) {
+          Logger.log("Part number and part count already processed: " + key);
+          continue;
+        }
+
+        activeSheet.insertRowAfter(nextRow);
+
+        var columnsToCopy = [1, 2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
+
+        var masterDataRowValues = columnsToCopy.map(function (columnIndex) {
+          return masterDataSheet.getRange(row, columnIndex).getValue();
+        });
+
+        // Find the current row in the active sheet based on MO number, part number, and part count
+        var lastRowActiveSheet = activeSheet.getLastRow();
+        var maxRow = 300; // Limit the number of rows to search
+        var foundRow = false;
+
+        while (currentActiveRow <= maxRow) {
+            if (activeSheet.getRange(currentActiveRow, 1).getValue() === "") {
+              foundRow = true;
+              break;
+            }
+            currentActiveRow++;
+          }
+          if (!foundRow) {
+         //   Logger.log("No available blank rows found within the first " + maxRow + " rows.");
+            return; // Exit the function or handle the situation as needed
+          }
+        // Paste the master_data row values into the new blank row in the active sheet
+        activeSheet.getRange(currentActiveRow, 1, 1, masterDataRowValues.length).setValues([masterDataRowValues]);
+
+        // Calculate the difference
+        var newPartAvailQtyIndex = 17;
+        var newPartAvailQty = activeSheet.getRange(currentActiveRow, newPartAvailQtyIndex).getValue();
+        var shortAboveQty = activeSheet.getRange(currentActiveRow - 1, 15).getValue();
+        var difference = shortAboveQty - newPartAvailQty;
+        var newPartCount = activeSheet.getRange(currentActiveRow, 14).getValue();
+
+        // Set the value of the "qty_short" column in the new active row
+        activeSheet.getRange(currentActiveRow, 15).setValue(difference);
+    //    Logger.log('active row part count is:' + newPartCount);
+
+        // Set the move box to true
+        activeSheet.getRange(currentActiveRow, 13).setValue(true);
+
+        // Update initialPartCount if necessary
+        initialPartCount = newPartCount;
+        nextRow = currentActiveRow;
+        // Logger.log('initial part should be:' + initialPartCount);
+        // Logger.log("current active row should be: " + nextRow);
+
+
+        // Mark the part number as processed
+        processedParts[partNumber] = true;
+
+        // Check if the difference is less than 0, break the loop
+        if (difference <= 0) {
+          moveInventory(); // Move inventory even if no match is found
+          return;
+        } else {
+          activeSheet.getRange(currentActiveRow, activeSheet.getLastColumn()).setBackgroundColor('#FFEB3B'); // Change color as needed
+          repeatLoop = true;
+        }
+      }
+    }
+
+  } catch (error) {
+   // Logger.log("Error in stillShort: " + error.message);
+  }
+}
+
+
+
+/** Transfer the data to the template */
+function transferData() {
+  var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  var activeSheet = findActiveSheetWithCheckedCheckbox();
+  var importTemplate = spreadsheet.getSheetByName('import_template_ab');
+  var shouldMoveData = false;
+  var sourceData = activeSheet.getDataRange().getValues();
+Logger.log("sourceData.length: " + sourceData.length);
+
+// 0-based index
+  var beginIndex = 1; // begin_location, column B
+  var partNumberIndex = 2; // part_number, column C
+  var pickQtyIndex = 4; // quantity, column E  
+  var vendorUOMIndex = 6; //vendor_uom, column G  
+  var productionIndex = 10; //used for production, column K
+  var moveBoxIndex = 12; // move_box, column M  
+  var partCountIndex = 13; //part_count, column N
+  var shortQtyIndex = 14; // qty_short, column O
+  var onHandIndex = 16; // on_hand, column Q
+
+  var valuesToPaste = []; // Array to accumulate values
+
+  for (var i = sourceData.length - 1; i >= 1; i--) { // Start from the last row and go up to row 2 (index 1)
+    var begin_location = sourceData[i][beginIndex]; // begin_location, column B
+    var partNumber = sourceData[i][partNumberIndex]; // part_number, column C
+    var pickQty = sourceData[i][pickQtyIndex]; // quantity, column E  
+    var vendorUOM = sourceData[i][vendorUOMIndex]; //vendor_uom, column G
+    var production = sourceData[i][productionIndex]; //used for production, column K
+    var moveBox = sourceData[i][moveBoxIndex]; // move_box, column M
+    var partCounts = parseInt(sourceData[i][partCountIndex]);//part_count, column N
+    var shortDiff = sourceData[i][shortQtyIndex]; // qty_short, column O
+    var prevDiff = sourceData[i-1][shortQtyIndex]; // qty_short, column O but previous row value
+    var onHand = sourceData[i][onHandIndex]; // on_hand, column Q
+
+
+    if (moveBox === true){
+        Logger.log(partNumber + ", " + shortDiff)
+        if(partCounts === 1 && shortDiff === ""){ //if there is sufficient qty on hand and additional data does NOT need to be brought in from master data tab
+         var quantities = (Number(vendorUOM) * Number(production)).toFixed(2);
+          shouldMoveData = true
+          Logger.log(partNumber + ": " + quantities)
+        }
+        else if (shortDiff >= 0){ //if there is insufficient qty on hand for this part, then use up all of the on hand for this part
+         var quantities = onHand;
+          shouldMoveData = true
+          Logger.log(partNumber + ": " + quantities)
+      } else if (shortDiff < 0){ //if additional iterations of the same part have been brought in and this is the last version of the part
+         var quantities = prevDiff
+          shouldMoveData = true
+          Logger.log(partNumber + ": " + quantities)
+      }
+   
+      var end_location = 'Atom Banana_Meal Kit-Picking';
+      var notes = " ";
+      var exp_date = " ";
+      var lot_number = " ";
+      valuesToPaste.push([partNumber, begin_location, quantities, end_location, notes, lot_number, exp_date, partCounts]);
+   
+
+  if (valuesToPaste.length > 0) {
+    // Specify the row where you want to start pasting the values (replace 'targetRow' accordingly)
+    var targetRow = 2;
+   
+    // Set values in the first column of the 'import_template_ab' sheet
+    importTemplate.getRange(targetRow, 1, valuesToPaste.length, valuesToPaste[0].length).setValues(valuesToPaste);
+    Logger.log('Data copied successfully!');
+     } else {
+    Logger.log('No data to copy.');
+  }
+
+}}  // Call the setFormulaForColumn function after the existing logic
+    // Transfer data if the flag is still true
+     if (shouldMoveData) {
+    // Set move boxes to false
+    for (var i = sourceData.length - 1; i >= 1; i--) {
+      activeSheet.getRange(i + 1, moveBoxIndex + 1).setValue(false); // Assuming move box index is 1-based
+    }
+    setFormulaForColumn();
+  }
+}
+ 
+/** Updates the lot number and expiration date info for import template */
+function setFormulaForColumn() {
+  // Get the active spreadsheet
+  var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+
+  // Specify the target sheet name
+  var targetSheetName = 'import_template_ab';
+
+  // Get the target sheet
+  var sheet = spreadsheet.getSheetByName(targetSheetName);
+
+  // Check if the target sheet exists
+  if (sheet) {
+    // Find the last row with data in column B
+    var finalRow = sheet.getRange('A:A').getValues().flat().filter(String).length;
+
+    // Set the formula for column 6 (e.g., column F)
+    var lotCodeIndex = 6; // Column F
+    partNumberIndex = 1; // Column A
+    partCountIndex = 8; // Column H
+    var startRow1 = 2; // Start from row 2
+
+    // Loop through rows and set the formula for column 6
+    for (var i = startRow1; i <= finalRow; i++) {
+      var partNumber = sheet.getRange(i, partNumberIndex).getValue();
+      var partCount = sheet.getRange(i, partCountIndex).getValue();
+      var lotCodeMatch = '=INDEX(master_data!C2:C, MATCH(1, (master_data!E2:E="' + partNumber + '") * (master_data!P2:P=' + partCount + '), 0))';
+
+  var lotCodeCell = sheet.getRange(i, lotCodeIndex);
+  lotCodeCell.setFormula(lotCodeMatch);
+}
+
+    // Set the formula for column 7 (e.g., column G)
+    var expirationDateIndex = 7; // Column G
+    var partNumberIndex = 1; // Column A
+    var partCountIndex = 8; // Column H
+    var startRow2 = 2;
+
+    // Loop through rows and set the formula for column 7
+    for (var j = startRow2; j <= finalRow; j++) {
+      var partNumber = sheet.getRange(j, partNumberIndex).getValue();
+      var partCount = sheet.getRange(j, partCountIndex).getValue();
+
+      var expirationDateMatch = '=INDEX(master_data!D2:D,  MATCH(1, (master_data!E2:E="' + partNumber + '") * (master_data!P2:P=' + partCount + '), 0))';
+      var expirationDate = sheet.getRange(j, expirationDateIndex);
+      expirationDate.setFormula(expirationDateMatch);
+    }
+  // // Display a message box
+  //   Browser.msgBox("Data transfer complete.");
+  // } else {
+  //   Logger.log("Sheet '" + targetSheetName + "' not found.");
+ }
+}
+
+
+function unmergeAllCells() {
+    var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    var sheets = spreadsheet.getSheets();
+
+    // Iterate through all sheets
+    sheets.forEach(function(sheet) {
+        var range = sheet.getDataRange();
+        var mergedRanges = range.getMergedRanges();
+
+        // Iterate through all merged ranges and unmerge them
+        mergedRanges.forEach(function(mergedRange) {
+            mergedRange.breakApart();
+        });
+    });
+}
+
+
+
+function downloadTemplate() {
+  var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = spreadsheet.getSheetByName("import_template_ab");
+  if (!sheet) {
+    Logger.log("Sheet not found!");
+    return;
+  }
+ 
+  // Get the data range
+  var range = sheet.getRange("A1:G" + sheet.getLastRow());
+  var values = range.getValues();
+ 
+  // Convert the data to CSV format with date values as strings
+  var csv = "";
+  for (var i = 0; i < values.length; i++) {
+    for (var j = 0; j < values[i].length; j++) {
+      if (values[i][j] instanceof Date) {
+        // Format date as string (e.g., "yyyy-MM-dd")
+        values[i][j] = Utilities.formatDate(values[i][j], Session.getScriptTimeZone(), "MM/dd/yyyy");
+      }
+    }
+    csv += values[i].join(",") + "\n";
+  }
+ 
+  // Create a Blob from the CSV data
+  var blob = Utilities.newBlob(csv, 'text/csv', 'import_template_ab.csv');
+ 
+  // Save the file to the user's Drive
+  var file = DriveApp.createFile(blob);
+ 
+  // Get the URL of the file
+  var fileUrl = file.getUrl();
+ 
+  Logger.log("CSV file created: " + fileUrl);
+ 
+  // Create a custom dialog to prompt the user with the download link
+  var html = '<html><body><a href="' + fileUrl + '" target="_blank">Click here to download the CSV file</a></body></html>';
+  var ui = SpreadsheetApp.getUi();
+  ui.showModalDialog(HtmlService.createHtmlOutput(html), 'Download CSV');
+}
+
+
+/** if you ever add new columns and need the widths for updating the initial script, comment this back in to get those values.*/
+// function getColumnWidths(sheetName) {
+//   var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+//   var columnCount = spreadsheet.getDataRange().getValues()[0].length;
+ 
+//   var columnWidths = [];
+//   for (var i = 1; i <= columnCount; i++) {
+//     columnWidths.push(spreadsheet.getColumnWidth(i));
+//   }
+ 
+//   Logger.log('Column Widths: ' + columnWidths);
+//   return columnWidths;
+ 
+function updateUsedinProduction() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet(); // First Google Sheet
+  var mkSheetName = mkSheet.getName();
+ 
+  var sourceSpreadsheetId = "193VO_Anu4XGvbkNYz4u1F_DD0FU_1_e_SIYOqD6mvgQ"; // Replace with the second sheet's ID
+  var sourceSpreadsheet = SpreadsheetApp.openById(sourceSpreadsheetId);
+ 
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return; // Exit if there's no data
+
+  var partNumbers = sheet.getRange("C2:C" + lastRow).getValues(); // part_number column
+  var dates = sheet.getRange("C2:C" + lastRow).getValues(); // Date column (must match tab names)
+  var outputRange = sheet.getRange("K2:K" + lastRow); // Column K where data is written
+
+  var outputValues = [];
+
+  for (var i = 0; i < partNumbers.length; i++) {
+    var partNumber = partNumbers[i][0];
+    var date = dates[i][0];
+
+    if (!partNumber || !date) {
+      outputValues.push([""]); // Skip if data is missing
+      continue;
+    }
+
+    var formattedDate = Utilities.formatDate(new Date(date), Session.getScriptTimeZone(), "yyyy-MM-dd");
+    var sourceSheetName = formattedDate; // Assuming the tab names match the date format
+
+    var sourceSheet = sourceSpreadsheet.getSheetByName(sourceSheetName);
+    if (!sourceSheet) {
+      outputValues.push([""]); // Skip if no matching tab
+      continue;
+    }
+
+    var sourceData = sourceSheet.getDataRange().getValues();
+    var partIndex = sourceData[0].indexOf("SKU"); // Find column index of part_number
+    var columnNIndex = 13; // Column N (0-based index is 13)
+
+    if (partIndex === -1) {
+      outputValues.push([""]); // Skip if part_number column isn't found
+      continue;
+    }
+
+    var valueFound = false;
+    for (var j = 1; j < sourceData.length; j++) { // Start at 1 to skip headers
+      if (sourceData[j][partIndex] == partNumber) {
+        outputValues.push([sourceData[j][columnNIndex]]);
+        valueFound = true;
+        break;
+      }
+    }
+
+    if (!valueFound) {
+      outputValues.push([""]); // No match found
+    }
+  }
+
+  outputRange.setValues(outputValues);
+}
+
